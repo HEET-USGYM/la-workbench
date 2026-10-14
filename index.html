@@ -1247,6 +1247,18 @@ function placeVocab(vocab, tokens, sents, links) {
     }
     v.guessed = !first && onLine.length > 1;
   });
+  // Under a sentence the entries follow the Latin, word by word. Sorting by
+  // line alone kept the sheet's VOCAB order within a line - notes first,
+  // dictionary forms after - which put 64 of 140 drawers out of step with
+  // the text. An entry with no word (sapiens, 7.3d) goes at the start of
+  // its line.
+  const pos = {};
+  tokens.forEach((t, i) => { pos[t.id] = i; });
+  vocab.forEach(v => {
+    const n = v.shownNo || v.lineNo;
+    v.order = v.echoIds && v.echoIds.length ? pos[v.echoIds[0]]
+      : tokens.findIndex(t => t.lineNo >= n) - 0.5;
+  });
 }
 
 
@@ -1790,10 +1802,9 @@ function renderBench() {
     state.clauses[s.id].forEach(cl => stick.appendChild(renderClause(cl, s, moved, activeClause)));
     tray.appendChild(stick);
 
-    // By line: the sheet lists matched words and head-words in separate
-    // runs, which is no order at all under a single sentence.
+    // In the order of the Latin; see the end of placeVocab().
     const notes = doc.vocab.filter(v => v.sentId === s.id)
-      .sort((a, b) => (a.shownNo || a.lineNo || 0) - (b.shownNo || b.lineNo || 0));
+      .sort((a, b) => a.order - b.order);
     if (notes.length) tray.appendChild(renderTrayVocab(s.id, notes));
 
     host.appendChild(tray);
