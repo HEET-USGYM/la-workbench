@@ -1577,12 +1577,17 @@ function renderSource() {
   const vHost = $('vocab');
   vHost.innerHTML = '';
   $('vWrap').style.display = doc.vocab.length ? '' : 'none';
+  // A line number only where it changes: repeated down a run of entries it
+  // is noise. See also numberDrawer().
+  let prevNo = null;
   doc.vocab.forEach(v => {
     const row = document.createElement('div');
     row.className = 'v-row' + (v.tokenId ? ' linked' : '');
     if (v.tokenId) row.dataset.jump = v.tokenId;
+    const no = v.shownNo && v.shownNo !== prevNo ? v.shownNo : '';
+    prevNo = v.shownNo;
     row.innerHTML =
-      '<span class="v-num">' + (v.shownNo || '') + '</span>' +
+      '<span class="v-num">' + no + '</span>' +
       '<span class="v-term">' + rich(v.term) + '</span>' +
       '<span class="v-def">' + rich(v.def) + '</span>';
     vHost.appendChild(row);
@@ -1811,6 +1816,7 @@ function renderBench() {
   });
 
   host.querySelectorAll('.clause-tr').forEach(fitTextarea);
+  numberDrawers();
   refreshEcho();
 }
 
@@ -1825,7 +1831,7 @@ function renderTrayVocab(sentId, notes) {
   d.className = 'tray-vocab';
   d.open = vocabOpen.has(sentId);
   d.addEventListener('toggle', () => {
-    if (d.open) vocabOpen.add(sentId); else vocabOpen.delete(sentId);
+    if (d.open) { vocabOpen.add(sentId); numberDrawer(d); } else vocabOpen.delete(sentId);
   });
   const sum = document.createElement('summary');
   sum.textContent = 'Aantekeningen (' + notes.length + ')';
@@ -1836,14 +1842,37 @@ function renderTrayVocab(sentId, notes) {
     const row = document.createElement('div');
     row.className = 'v-row';
     if (v.echoIds.length) row.dataset.vtok = v.echoIds.join(' ');
+    row.dataset.no = v.shownNo || '';
     row.innerHTML =
-      '<span class="v-num">' + (v.shownNo || '') + '</span>' +
+      '<span class="v-num"></span>' +
       '<span class="tv-body"><span class="v-term">' + rich(v.term) + '</span> ' +
       '<span class="v-def">' + rich(v.def) + '</span></span>';
     cols.appendChild(row);
   });
   d.appendChild(cols);
+  numberDrawer(d);
   return d;
+}
+
+// A line number only where it changes - and at the top of every column,
+// where the entry above it is at the bottom of the previous one and the
+// number is the only thing that says which line it is on. Where the
+// columns break is only known once laid out, so this runs again after
+// renderBench(), on opening a drawer, and when the bench changes width.
+// The number column keeps its width either way, so emptying one cannot
+// move a column break.
+function numberDrawer(d) {
+  let prevNo = null, prevLeft = null;
+  d.querySelectorAll('.v-row').forEach(r => {
+    const left = d.open && d.isConnected ? r.offsetLeft : 0;
+    const no = r.dataset.no;
+    r.querySelector('.v-num').textContent =
+      no && (no !== prevNo || left !== prevLeft) ? no : '';
+    prevNo = no; prevLeft = left;
+  });
+}
+function numberDrawers() {
+  document.querySelectorAll('#bench .tray-vocab[open]').forEach(numberDrawer);
 }
 
 function renderClause(cl, sent, showOrdinals, activeClause) {
@@ -2399,6 +2428,7 @@ function toggleMaximise(on) {
   b.title = on ? 'Tekst en vragen weer tonen (Esc)' : 'Alleen de werkbank tonen';
   b.setAttribute('aria-pressed', on ? 'true' : 'false');
   hidePopover();
+  numberDrawers();
 }
 
 function collectGroups(id, out) {
@@ -3146,7 +3176,7 @@ function wire() {
   document.addEventListener('click', e => {
     if (pop && !e.target.closest('.popover') && !e.target.closest('[data-note]')) hidePopover();
   });
-  window.addEventListener('resize', hidePopover);
+  window.addEventListener('resize', () => { hidePopover(); numberDrawers(); });
 
   // Keyboard
   window.addEventListener('keydown', e => {
