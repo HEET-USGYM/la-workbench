@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Latijnse werkbank</title>
+<title>Latijn werkbank</title>
 <style>
   /* ------------------------------------------------------------------
      Palette. The left ("tekst") pane deliberately echoes the printed
@@ -350,6 +350,16 @@
   }
   .tray-vocab[open] summary{ margin-bottom:3px; }
   .tray-vocab .v-row[data-vtok]:hover{ background:rgba(168,118,44,.12); border-radius:3px; }
+  /* A word and its entry pointing at each other; see setVocabEcho(). */
+  .tray-vocab .v-row.is-vecho{ background:var(--sel); border-radius:3px; }
+  .tray-vocab.is-vecho summary{ color:var(--accent); }
+  .tray-vocab.is-vecho summary::after{ content:" \25CF"; }
+  .tok.is-vecho{ border-color:var(--accent); background:var(--sel); }
+  /* Two columns, filled top to bottom so the line numbers still read in
+     order; one when the bench is too narrow for two of at least 230px. */
+  .tv-cols{ columns:2 230px; column-gap:22px; }
+  .tv-cols .v-row{ break-inside:avoid; }
+  .tv-body{ flex:1 1 auto; min-width:0; }
 
   /* The composing stick. Now a column: one row per clause, indented by
      its depth, exactly like the staircase on the paper key. */
@@ -568,7 +578,7 @@
 <body>
 
 <header class="bar">
-  <h1>Latijnse werkbank</h1>
+  <h1>Latijn werkbank</h1>
   <span class="doc-title" id="docTitle">—</span>
   <span class="spacer"></span>
   <select class="picker" id="textPicker" aria-label="Kies een tekst" hidden></select>
@@ -952,14 +962,18 @@ function buildModel(sections) {
   let nextLineNo = 1;
 
   sections.text.forEach((entry, li) => {
-    if (entry.num !== null) nextLineNo = parseInt(entry.num, 10);
-    const lineNo = nextLineNo++;
-
-    const latinMask = buildFormatMask(entry.latinRaw);
     // The salutation of a letter: its Latin half is italic from end to end
     // (CONVENTIONS.md). It is one sentence on the bench, whatever its
     // abbreviations and dates contain.
     const heading = /^_[\s\S]*_$/.test(entry.latinRaw.trim());
+    // And as an opening line it does not count, as on the sheet and in
+    // check_bereiken.tekstregels(): numbering it put every line, and every
+    // VOCAB line number, one ahead of the paper. Line 0 shows no number.
+    // Token ids go by lineIdx, so saved work is not touched by this.
+    if (entry.num !== null) nextLineNo = parseInt(entry.num, 10);
+    const lineNo = heading && li === 0 && entry.num === null ? 0 : nextLineNo++;
+
+    const latinMask = buildFormatMask(entry.latinRaw);
     const glossMask = buildFormatMask(entry.glossRaw);
 
     // Same pairing rule as the editor: gloss chunk i belongs to Latin
@@ -1061,12 +1075,13 @@ function buildModel(sections) {
   if (cur.length) sentences.push(cur);
 
   const sents = sentences.map((toks, i) => {
-    const nums = toks.map(t => t.lineNo);
+    const nums = toks.map(t => t.lineNo).filter(n => n > 0);
     const lo = Math.min(...nums), hi = Math.max(...nums);
     return {
       id: 'S' + i,
       label: 'Zin ' + (i + 1),
-      lines: lo === hi ? ('r. ' + lo) : ('r. ' + lo + '\u2013' + hi),
+      lines: !nums.length ? 'opschrift'
+        : lo === hi ? ('r. ' + lo) : ('r. ' + lo + '\u2013' + hi),
       tokenIds: toks.map(t => t.id),
     };
   });
@@ -1122,35 +1137,71 @@ function attachVocab(vocab, tokens) {
     if (at >= 0) {
       tokens[at].notes.push({ term, def: v.def });
       entry.tokenId = tokens[at].id;
+      entry.tokenIds = tokens.slice(at, at + wanted.length).map(t => t.id);
     }
   });
 
   return out;
 }
 
-// Which sentence on the bench each VOCAB entry goes under. A matched entry
-// goes where its word is. An unmatched one - a head-word, "consolor" for
-// "consolarer" - only has its line number, and a line can hold the end of
-// one sentence and the start of the next; there the first sentence with a
-// word sharing the term's first four letters wins, else the first on the
-// line. Never dropped: every entry lands somewhere, as on the left.
+// Which sentence on the bench each VOCAB entry goes under, and which words
+// in the text it lights up on hover (echoIds). A matched entry has both
+// already. An unmatched one - a head-word, "consolor" for "consolarer" -
+// only has its line number, and a line can hold the end of one sentence and
+// the start of the next. So we look on that line for its word: the form
+// itself, else a word sharing its first four letters, else three, trying
+// every principal part ("fero, ferre, tuli, latum" must find "latus";
+// "spes, spei" must find "spem"). A phrase ("tantas ... quantas") looks for
+// each of its words, the rest after the first. What still finds nothing goes
+// under the first sentence on its line: never dropped, as on the left.
 function placeVocab(vocab, tokens, sents) {
   const sentOf = {};
   sents.forEach(s => s.tokenIds.forEach(id => { sentOf[id] = s.id; }));
   const byId = {};
   tokens.forEach(t => { byId[t.id] = t; });
+  const latin = str => (str.toLowerCase().match(/[a-zÀ-ɏ]+/g) || [])
+    .filter(w => w.length >= 2);
+  const lookFor = (ids, forms) => {
+    for (const n of [0, 4, 3]) {
+      const id = ids.find(id => forms.some(f => n === 0
+        ? byId[id].key === f
+        : f.length >= 3 && byId[id].key.startsWith(f.slice(0, n))));
+      if (id) return id;
+    }
+    return null;
+  };
+
   vocab.forEach(v => {
-    if (v.tokenId) { v.sentId = sentOf[v.tokenId]; return; }
+    if (v.tokenId) {
+      v.sentId = sentOf[v.tokenId];
+      v.echoIds = v.tokenIds;
+      return;
+    }
     const onLine = sents.filter(s => s.tokenIds.some(id => byId[id].lineNo === v.lineNo));
-    // Every principal part counts: "fero, ferre, tuli, latum" must find "latus".
-    // Four letters first, then three: "spes, spei" must still find "spem".
-    const words = v.term.toLowerCase().match(/[a-z\u00C0-\u024F]{3,}/g) || [];
-    const sharing = n => onLine.find(s => s.tokenIds.some(id =>
-      byId[id].lineNo === v.lineNo && words.some(w => byId[id].key.startsWith(w.slice(0, n)))));
-    const like = sharing(4) || sharing(3);
-    const s = like || onLine[0] || sents[0];
-    v.sentId = s ? s.id : null;
-    v.guessed = !like && onLine.length > 1;
+    const lineIds = [].concat(...onLine.map(s =>
+      s.tokenIds.filter(id => byId[id].lineNo === v.lineNo)));
+    const parts = v.term.split(',');
+    const phrase = latin(parts[0]);
+    const first = phrase.length > 1
+      ? lookFor(lineIds, [phrase[0]])
+      : lookFor(lineIds, [].concat(...parts.map(latin)));
+    v.echoIds = [];
+    if (first) {
+      v.sentId = sentOf[first];
+      v.echoIds.push(first);
+      if (phrase.length > 1) {
+        const sentIds = sents.find(s => s.id === v.sentId).tokenIds;
+        let rest = sentIds.slice(sentIds.indexOf(first) + 1);
+        phrase.slice(1).forEach(w => {
+          const id = lookFor(rest, [w]);
+          if (id) { v.echoIds.push(id); rest = rest.slice(rest.indexOf(id) + 1); }
+        });
+      }
+    } else {
+      const s = onLine[0] || sents[0];
+      v.sentId = s ? s.id : null;
+    }
+    v.guessed = !first && onLine.length > 1;
   });
 }
 
@@ -1402,7 +1453,7 @@ function renderSource() {
   host.innerHTML = '';
   $('srcHeading').textContent = doc.title || 'Zonder titel';
   $('docTitle').textContent = doc.title || '—';
-  document.title = (doc.title || 'Latijnse werkbank') + ' — werkbank';
+  document.title = (doc.title || 'Latijn werkbank') + ' — werkbank';
 
   // De Nederlandse inleiding staat boven het Latijn en wordt NIET getokeniseerd:
   // zij hoort niet bij de tekst die de leerling ontleedt. Daarom staat zij ook
@@ -1420,7 +1471,7 @@ function renderSource() {
 
     const num = document.createElement('div');
     num.className = 'src-num';
-    num.textContent = line.lineNo;
+    num.textContent = line.lineNo || '';
     row.appendChild(num);
 
     const words = document.createElement('div');
@@ -1724,16 +1775,19 @@ function renderTrayVocab(sentId, notes) {
   const sum = document.createElement('summary');
   sum.textContent = 'Aantekeningen (' + notes.length + ')';
   d.appendChild(sum);
+  const cols = document.createElement('div');
+  cols.className = 'tv-cols';
   notes.forEach(v => {
     const row = document.createElement('div');
     row.className = 'v-row';
-    if (v.tokenId) row.dataset.vtok = v.tokenId;
+    if (v.echoIds.length) row.dataset.vtok = v.echoIds.join(' ');
     row.innerHTML =
       '<span class="v-num">' + (v.lineNo || '') + '</span>' +
-      '<span class="v-term">' + rich(v.term) + '</span>' +
-      '<span class="v-def">' + rich(v.def) + '</span>';
-    d.appendChild(row);
+      '<span class="tv-body"><span class="v-term">' + rich(v.term) + '</span> ' +
+      '<span class="v-def">' + rich(v.def) + '</span></span>';
+    cols.appendChild(row);
   });
+  d.appendChild(cols);
   return d;
 }
 
@@ -1959,10 +2013,37 @@ let hoverEcho = null;
 function refreshEcho() {
   const lit = new Set();
   sel.ids.forEach(id => descendants(id).forEach(t => lit.add(t)));
-  if (hoverEcho) lit.add(hoverEcho);
+  // Space-separated: a VOCAB phrase lights up each of its words.
+  if (hoverEcho) hoverEcho.split(' ').forEach(id => lit.add(id));
   document.querySelectorAll('#src .w').forEach(w => {
     w.classList.toggle('echo', lit.has(w.dataset.id));
   });
+}
+
+// On the bench, a word and its VOCAB entry point at each other. Hovering a
+// word lights up its entry under the sentence - or, with the drawer shut,
+// the drawer's heading, so a student sees there is more to know without
+// opening it. Hovering an entry lights up its words on the bench, and not
+// in the source pane: what is wanted there is "where is it in what I am
+// working on". Pure decoration, so it is cleared and redrawn on every
+// event rather than surviving renderBench().
+function setVocabEcho(tokId, vtok) {
+  const bench = $('bench');
+  bench.querySelectorAll('.is-vecho').forEach(el => el.classList.remove('is-vecho'));
+  if (vtok) {
+    vtok.split(' ').forEach(id => {
+      const t = bench.querySelector('.tok[data-id="' + id + '"]');
+      if (t) t.classList.add('is-vecho');
+    });
+  }
+  if (tokId) {
+    bench.querySelectorAll('.tray-vocab [data-vtok]').forEach(row => {
+      if (!row.dataset.vtok.split(' ').includes(tokId)) return;
+      row.classList.add('is-vecho');
+      const d = row.closest('.tray-vocab');
+      if (!d.open) d.classList.add('is-vecho');
+    });
+  }
 }
 
 function setHoverEcho(id) {
@@ -2974,9 +3055,10 @@ function wire() {
   bench.addEventListener('pointerover', e => {
     const tok = e.target.closest('.tok');
     const vrow = e.target.closest('[data-vtok]');
-    setHoverEcho(tok ? tok.dataset.id : vrow ? vrow.dataset.vtok : null);
+    setHoverEcho(tok ? tok.dataset.id : null);
+    setVocabEcho(tok ? tok.dataset.id : null, vrow ? vrow.dataset.vtok : null);
   });
-  bench.addEventListener('pointerleave', () => setHoverEcho(null));
+  bench.addEventListener('pointerleave', () => { setHoverEcho(null); setVocabEcho(null, null); });
 
   // The per-clause translation lines. A snapshot on focus means undo
   // restores what was there before this edit, not before every keystroke.
