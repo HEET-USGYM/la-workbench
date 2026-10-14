@@ -174,7 +174,11 @@
     flex:1 1 auto; min-width:0;
     display:flex; flex-wrap:wrap; align-items:flex-start;
   }
-  .src-item{ display:flex; flex-direction:column; align-items:flex-start; }
+  /* The gloss is positioned, not laid out: it takes no width, so the Latin
+     keeps its natural spacing and layoutGlosses() decides where the gloss
+     goes. The padding is the gloss row, the same height for every word. */
+  .src-item{ display:flex; flex-direction:column; align-items:flex-start;
+    position:relative; padding-bottom:17px; }
   .src-item.gap{ margin-right:.32em; }
   .src-lat{
     font-family:var(--serif); font-size:18px; line-height:1.35;
@@ -182,8 +186,9 @@
   }
   .src-item.has-gloss .src-lat{ border-bottom:1px dotted #b0a68e; }
   .src-gloss{
+    position:absolute; left:0; bottom:0;
     font-family:var(--serif); font-style:italic; font-size:11.5px;
-    line-height:1.5; color:var(--muted); min-height:1.5em;
+    line-height:1.5; color:var(--muted);
     white-space:nowrap;
   }
   .w{ cursor:pointer; border-radius:2px; padding:0 1px; }
@@ -1017,6 +1022,17 @@ function buildModel(sections, links) {
           // has to travel with one of them.
           gloss: wi === 0 ? glossHTML : '',
           notes: [],
+          // Whether the text has a space after this word, looking past
+          // slashes and formatting marks. Decided per word and carried along
+          // when punctuation is glued on below: by chunk it was lost, and
+          // "/habentur/, /numeremus/: Paulos" read "habentur,numeremus:Paulos"
+          // in the source pane - 96 times over the corpus.
+          spaceAfter: (() => {
+            let k = w.end;
+            while (k < entry.latinRaw.length &&
+                   (entry.latinRaw[k] === '/' || latinMask.isMarker[k])) k++;
+            return k < entry.latinRaw.length && /\s/.test(entry.latinRaw[k]);
+          })(),
         };
         tokens.push(tok);
         byId.set(tok.id, tok);
@@ -1040,10 +1056,14 @@ function buildModel(sections, links) {
   let lead = null;
   tokens.forEach(t => {
     if (t.key === '' && !t.gloss && !t.notes.length) {
-      if (kept.length) {
+      // Space before it and none after: it opens the next word (the quote
+      // in "inquit '/perdidi/'"), so it goes there and not onto "inquit".
+      const opens = kept.length && kept[kept.length - 1].spaceAfter && !t.spaceAfter;
+      if (kept.length && !opens) {
         const p = kept[kept.length - 1];
         p.htmlFull += t.htmlFull;
         p.plain += t.plain;
+        p.spaceAfter = t.spaceAfter;
       } else {
         lead = lead ? { htmlFull: lead.htmlFull + t.htmlFull, plain: lead.plain + t.plain }
                     : { htmlFull: t.htmlFull, plain: t.plain };
@@ -1504,6 +1524,66 @@ function containsNode(ancestor, nodeId) {
 
 const $ = id => document.getElementById(id);
 
+// Where each gloss goes, as the editor does it for the sheets (commit
+// e2ed4f8): the Latin keeps its natural spacing and the gloss is what moves.
+// A gloss is centred on its word - or on its whole group, for /una cum/ -
+// and may reach out under neighbours that carry no gloss. Only where two
+// glosses would collide does the Latin give way, by moving the later word
+// just far enough that its gloss still covers it. At the edge of a row there
+// is no neighbour, so no gap is kept there.
+//
+// Before this the gloss was part of its word's box and widened it: 131 words
+// across the corpus had space after them that was only there for a gloss,
+// 3040px in all, and 555 of 635 glosses sat more than 3px off their word's
+// centre. Layout-dependent, so it runs again whenever the pane changes width.
+const GLOSS_GAP = 6;
+function layoutGlosses() {
+  const host = $('src');
+  if (!host || !host.offsetParent) return;          // folded or maximised away
+  host.querySelectorAll('.src-words').forEach(row => {
+    const items = [...row.children];
+    items.forEach(it => { it.style.marginLeft = ''; });
+    const W = row.clientWidth;
+    let prevRight = null, prevTop = null;
+    items.forEach((it, i) => {
+      const g = it.querySelector('.src-gloss');
+      if (!g || !g.innerHTML) return;
+      let j = i;
+      while (j + 1 < items.length && items[j + 1].dataset.gl === it.dataset.gl) j++;
+      const box = () => {
+        const rb = row.getBoundingClientRect();
+        const a = it.querySelector('.src-lat').getBoundingClientRect();
+        const z = items[j].querySelector('.src-lat').getBoundingClientRect();
+        return { left: a.left - rb.left, right: z.right - rb.left, top: Math.round(a.top - rb.top) };
+      };
+      const gw = g.getBoundingClientRect().width;
+      const place = b => {
+        const ww = b.right - b.left;
+        const start = b.top !== prevTop;               // first gloss on this row
+        const minLeft = start ? 0 : prevRight + GLOSS_GAP;
+        let pos = Math.max(b.left + (ww - gw) / 2, minLeft, 0);
+        // Not past the right edge, as long as the gloss still covers its word.
+        if (pos + gw > W) pos = Math.max(minLeft, W - gw, gw >= ww ? b.right - gw : b.left);
+        return { pos, maxLeft: gw >= ww ? b.left : b.right - gw };
+      };
+      let b = box(), pl = place(b);
+      if (pl.pos > pl.maxLeft + 0.5) {
+        it.style.marginLeft = (pl.pos - pl.maxLeft) + 'px';
+        const moved = box();
+        if (moved.top !== b.top) {                       // pushed onto the next row
+          it.style.marginLeft = '';
+          b = box(); pl = place(b);
+        } else {
+          b = moved; pl = { pos: pl.pos };
+        }
+      }
+      const itemLeft = it.getBoundingClientRect().left - row.getBoundingClientRect().left;
+      g.style.left = (pl.pos - itemLeft) + 'px';
+      prevRight = pl.pos + gw; prevTop = b.top;
+    });
+  });
+}
+
 function renderSource() {
   const host = $('src');
   host.innerHTML = '';
@@ -1537,10 +1617,14 @@ function renderSource() {
       chunk.tokens.forEach((t, wi) => {
         const item = document.createElement('div');
         item.className = 'src-item';
-        const isLastOfChunk = wi === chunk.tokens.length - 1;
-        if (!isLastOfChunk || chunk.spaceAfter) item.classList.add('gap');
+        if (t.spaceAfter) item.classList.add('gap');
         const showGloss = wi === 0 && chunk.glossHTML;
-        if (showGloss) item.classList.add('has-gloss');
+        // The whole glossed group is underlined, as on paper; its gloss
+        // hangs from the first word and is centred on the group.
+        if (chunk.glossHTML) {
+          item.classList.add('has-gloss');
+          item.dataset.gl = t.lineIdx + '.' + t.chunkIdx;
+        }
 
         const lat = document.createElement('div');
         lat.className = 'src-lat';
@@ -1573,6 +1657,7 @@ function renderSource() {
     row.appendChild(words);
     host.appendChild(row);
   });
+  layoutGlosses();
 
   const vHost = $('vocab');
   vHost.innerHTML = '';
@@ -2429,6 +2514,7 @@ function toggleMaximise(on) {
   b.setAttribute('aria-pressed', on ? 'true' : 'false');
   hidePopover();
   numberDrawers();
+  layoutGlosses();
 }
 
 function collectGroups(id, out) {
@@ -3176,7 +3262,13 @@ function wire() {
   document.addEventListener('click', e => {
     if (pop && !e.target.closest('.popover') && !e.target.closest('[data-note]')) hidePopover();
   });
-  window.addEventListener('resize', () => { hidePopover(); numberDrawers(); });
+  window.addEventListener('resize', () => { hidePopover(); numberDrawers(); layoutGlosses(); });
+  $('sWrap').addEventListener('toggle', layoutGlosses);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(layoutGlosses);
+  // Paper is wider than the pane: lay out again for it, and back after.
+  window.addEventListener('beforeprint', layoutGlosses);
+  window.addEventListener('afterprint', layoutGlosses);
+  if (window.matchMedia) window.matchMedia('print').addEventListener('change', layoutGlosses);
 
   // Keyboard
   window.addEventListener('keydown', e => {
