@@ -347,6 +347,27 @@
   .tray-reset:hover{ color:var(--danger); background:rgba(156,59,43,.09); }
   .tray.moved .tray-head{ background:#d7d2c2; }
 
+  /* A cluster: words that share one gloss, as one block. See appendNodes(). */
+  .clu{ display:inline-flex; flex-direction:column; align-items:stretch; }
+  .clu-row{
+    display:inline-flex; align-items:center;
+    background:var(--slug); border:1px solid var(--slug-edge);
+    border-radius:2px; box-shadow:0 1px 0 #b6ad98;
+  }
+  .clu-row > .tok{ border-color:transparent; box-shadow:none; border-radius:0; }
+  .clu-row > .tok + .tok, .clu-row > .grp + .tok, .clu-row > .tok + .grp{
+    border-left:1px dashed #d6cdb8;
+  }
+  .clu-row > .grp{ margin:2px 3px; }
+  .clu-row .tok-lat{ border-bottom:1px dotted #b0a68e; }
+  .clu-row > .tok.is-sel{ box-shadow:inset 0 0 0 1px #c9a44f; }
+  .clu-row > .tok.is-focus{ box-shadow:inset 0 0 0 2px rgba(168,118,44,.5); }
+  .clu-row > .tok.is-vecho{ box-shadow:inset 0 0 0 1px var(--accent); }
+  .clu-gloss{
+    text-align:center; white-space:nowrap; padding-top:1px;
+    font-family:var(--serif); font-style:italic; font-size:10.5px; color:var(--muted);
+  }
+
   /* A sentence's VOCAB entries, under its stick; see renderTrayVocab(). */
   .tray-vocab{ border-top:1px solid #c9c2b1; padding:4px 9px 5px; }
   .tray-vocab summary{
@@ -1083,6 +1104,18 @@ function buildModel(sections, links) {
     tokens = kept;
   }
 
+  // --- Clusters: words that share one gloss ---
+  // "/capras et oves quot/" has one gloss for four words: it is pretranslated
+  // as a unit. On the bench such a cluster is one block that keeps its order
+  // and moves whole (teacher, 2026-10-14) - see clusterRuns() and moveUnit().
+  const clusters = new Map(), clusterOf = new Map();
+  lines.forEach(l => l.chunks.forEach(c => {
+    if (!c.glossHTML || c.tokens.length < 2) return;
+    const key = c.tokens[0].id;
+    clusters.set(key, c.tokens.map(t => t.id));
+    c.tokens.forEach(t => clusterOf.set(t.id, key));
+  }));
+
   // --- Sentences: the real unit of construing, and they run across line
   // breaks, so we segment on final punctuation rather than on lines. ---
   const sentences = [];
@@ -1115,6 +1148,7 @@ function buildModel(sections, links) {
   // textEntries gaat mee omdat de rijen van een {tabel:...}-vraag uit de
   // vetdruk in de TEXT komen; zie tableRows().
   return { title: sections.title, intro: introAlineas(sections.intro), lines, tokens, byId,
+           clusters, clusterOf,
            sents, vocab, questions: sections.questions,
            textEntries: sections.text };
 }
@@ -1515,6 +1549,52 @@ function containsNode(ancestor, nodeId) {
   if (ancestor === nodeId) return true;
   if (!isGroup(ancestor)) return false;
   return state.groups[ancestor].children.some(c => containsNode(c, nodeId));
+}
+
+// --- clusters --------------------------------------------------------
+// A cluster is pretranslated, so taking it apart teaches nothing about the
+// Latin: its words keep their order, move as one block, take no clause
+// boundary, and a colour that reaches across its edge takes all of it
+// (teacher, 2026-10-14). Nothing of this is stored: a cluster is "intact"
+// wherever its words stand together in order, and only then is it a block.
+// Work saved before 2026-10-14 that already pulled one apart is left as it
+// is - those words are just words again.
+
+// The cluster all of this node's words belong to, or null.
+function clusterOfNode(nid) {
+  const lv = descendants(nid);
+  if (!lv.length) return null;
+  const k = doc.clusterOf.get(lv[0]);
+  return k && lv.every(id => doc.clusterOf.get(id) === k) ? k : null;
+}
+// The intact clusters among a container's children: consecutive nodes that
+// hold one cluster's words, all of them. [{key, start, end}], end exclusive.
+function clusterRuns(kids) {
+  const runs = [];
+  for (let i = 0; i < kids.length; ) {
+    const k = clusterOfNode(kids[i]);
+    if (!k) { i++; continue; }
+    let j = i, n = 0;
+    while (j < kids.length && clusterOfNode(kids[j]) === k) { n += descendants(kids[j]).length; j++; }
+    if (n === doc.clusters.get(k).length) runs.push({ key: k, start: i, end: j });
+    i = j;
+  }
+  return runs;
+}
+// What moves when this node is moved: its whole block, if it is in one.
+function moveUnit(nid) {
+  const k = clusterOfNode(nid);
+  let n = nid;
+  while (k) {
+    const p = parentOf(n);
+    if (!p || isClause(p) || clusterOfNode(p) !== k) break;
+    n = p;
+  }
+  const container = parentOf(n);
+  if (!k || !container) return { container, ids: [nid] };
+  const kids = childrenOf(container), at = kids.indexOf(n);
+  const r = clusterRuns(kids).find(r => r.start <= at && at < r.end);
+  return r ? { container, ids: kids.slice(r.start, r.end) } : { container, ids: [nid] };
 }
 
 
@@ -1969,7 +2049,7 @@ function renderClause(cl, sent, showOrdinals, activeClause) {
   const line = document.createElement('div');
   line.className = 'clause-line';
   line.dataset.container = cl.id;
-  cl.nodes.forEach(nid => line.appendChild(renderNode(nid, sent, showOrdinals)));
+  appendNodes(line, cl.nodes, sent, showOrdinals);
   wrap.appendChild(line);
 
   const tr = document.createElement('textarea');
@@ -1996,6 +2076,36 @@ function isPristine(s) {
   const flat = [];
   cls[0].nodes.forEach(n => descendants(n, flat));
   return flat.length === s.tokenIds.length && flat.every((id, i) => id === s.tokenIds[i]);
+}
+
+// A container's children, with each intact cluster drawn as one block: its
+// words side by side in a single frame, dashed between them, and the gloss
+// centred under the whole - as on the left. data-count says how many nodes
+// the block holds, for counting drop positions in onPointerUp().
+function appendNodes(host, nodes, sent, showOrdinals) {
+  const runs = clusterRuns(nodes);
+  for (let i = 0; i < nodes.length; ) {
+    const r = runs.find(r => r.start === i);
+    if (!r) { host.appendChild(renderNode(nodes[i], sent, showOrdinals)); i++; continue; }
+    const block = document.createElement('span');
+    block.className = 'clu';
+    block.dataset.count = r.end - r.start;
+    const row = document.createElement('span');
+    row.className = 'clu-row';
+    nodes.slice(r.start, r.end).forEach(n => row.appendChild(renderNode(n, sent, showOrdinals)));
+    const firstId = doc.clusters.get(r.key)[0];
+    const own = row.querySelector('.tok[data-id="' + firstId + '"] > .tok-gloss');
+    if (own) own.remove();
+    block.appendChild(row);
+    if (state.showGloss && doc.byId.get(firstId).gloss) {
+      const g = document.createElement('span');
+      g.className = 'clu-gloss';
+      g.innerHTML = doc.byId.get(firstId).gloss;
+      block.appendChild(g);
+    }
+    host.appendChild(block);
+    i = r.end;
+  }
 }
 
 function renderNode(nid, sent, showOrdinals) {
@@ -2065,7 +2175,7 @@ function renderGroup(gid, sent, showOrdinals) {
   const inner = document.createElement('span');
   inner.className = 'grp-inner';
   inner.dataset.container = gid;
-  g.children.forEach(cid => inner.appendChild(renderNode(cid, sent, showOrdinals)));
+  appendNodes(inner, g.children, sent, showOrdinals);
   body.appendChild(inner);
   appendNote(body, gid);
   el.appendChild(body);
@@ -2241,7 +2351,14 @@ function selectNode(id, extend) {
       const a = kids.indexOf(ancestorIn(anchor, common));
       const b = kids.indexOf(ancestorIn(id, common));
       if (a >= 0 && b >= 0) {
-        const [lo, hi] = a <= b ? [a, b] : [b, a];
+        let [lo, hi] = a <= b ? [a, b] : [b, a];
+        // A range that reaches across the edge of a cluster takes all of it:
+        // the relation is then between the cluster and the other word(s).
+        clusterRuns(kids).forEach(r => {
+          const overlaps = r.start <= hi && lo < r.end;
+          const inside = lo >= r.start && hi < r.end;
+          if (overlaps && !inside) { lo = Math.min(lo, r.start); hi = Math.max(hi, r.end - 1); }
+        });
         sel = { container: common, ids: kids.slice(lo, hi + 1), anchor, focus: id };
         renderBench(); updateTools(); return;
       }
@@ -2421,6 +2538,12 @@ function splitClause() {
   let top = sel.ids[0];
   while (parentOf(top) && parentOf(top) !== cid) top = parentOf(top);
   const at = cl.nodes.indexOf(top);
+  // Not through a cluster: it is pretranslated, so a clause boundary inside
+  // it would show the student nothing about the Latin.
+  if (clusterRuns(cl.nodes).some(r => at > r.start && at < r.end)) {
+    toast('Deze woorden zijn samen vertaald; ze blijven op één regel.');
+    return;
+  }
 
   snapshot();
   if (at <= 0) {                       // nothing in front of it to split off
@@ -2531,29 +2654,35 @@ function collectGroups(id, out) {
 // Alt + arrow. At the edge of a group the word steps out of it; at the
 // edge of a clause it steps onto the neighbouring line. Everything the
 // mouse can do, without the mouse.
+// A word in a cluster carries its whole block, and a block next door is
+// stepped over whole, so that nothing ever lands inside one.
 function nudge(dir) {
   if (sel.ids.length !== 1) return;
   const id = sel.ids[0];
-  const container = parentOf(id);
+  const { container, ids } = moveUnit(id);
   if (!container) return;
   const kids = childrenOf(container);
-  const i = kids.indexOf(id);
-  const target = i + dir;
+  const i = kids.indexOf(ids[0]), j = i + ids.length;
+  const runs = clusterRuns(kids);
 
-  if (target >= 0 && target < kids.length) {
-    moveNode(id, container, target);
+  if (dir < 0 && i > 0) {
+    const r = runs.find(r => r.end === i);
+    moveNodes(ids, container, r ? r.start : i - 1);
+  } else if (dir > 0 && j < kids.length) {
+    const r = runs.find(r => r.start === j);
+    moveNodes(ids, container, (r ? r.end : j + 1) - ids.length);
   } else if (isGroup(container)) {
     const outer = parentOf(container);
     if (!outer) return;
     const at = childrenOf(outer).indexOf(container);
-    moveNode(id, outer, dir < 0 ? at : at + 1);
+    moveNodes(ids, outer, dir < 0 ? at : at + 1);
   } else {
     const sid = clauseSentence(container);
     const list = state.clauses[sid];
     const ci = list.findIndex(c => c.id === container);
     const nb = list[ci + dir];
     if (!nb) return;
-    moveNode(id, nb.id, dir < 0 ? nb.nodes.length : 0);
+    moveNodes(ids, nb.id, dir < 0 ? nb.nodes.length : 0);
   }
   sel = { container: parentOf(id), ids: [id] };
   renderBench(); updateTools();
@@ -2570,16 +2699,20 @@ function onPointerDown(e) {
 
   const handle = e.target.closest('[data-handle]');
   const tok = e.target.closest('.tok');
-  const nodeEl = handle ? bench.querySelector('.grp[data-id="' + handle.dataset.handle + '"]') : tok;
+  let nodeEl = handle ? bench.querySelector('.grp[data-id="' + handle.dataset.handle + '"]') : tok;
   if (!nodeEl) {
     if (e.target.closest('.clause-line')) clearSelection();
     return;
   }
 
   const id = handle ? handle.dataset.handle : tok.dataset.id;
+  // A word or colour inside a cluster drags the whole block.
+  const unit = moveUnit(id);
+  const block = (unit.ids.length > 1 || unit.ids[0] !== id) ? (handle || tok).closest('.clu') : null;
+  if (block) nodeEl = block;
   const rect = nodeEl.getBoundingClientRect();
   drag = {
-    id, nodeEl, started: false,
+    id, ids: unit.ids, nodeEl, started: false,
     dx: e.clientX - rect.left, dy: e.clientY - rect.top,
     startX: e.clientX, startY: e.clientY,
     tray: trayOf(id),
@@ -2622,13 +2755,18 @@ function startDrag() {
 function positionSlot(x, y) {
   const under = document.elementFromPoint(x, y);
   if (!under) return;
-  const container = under.closest('[data-container]');
+  let container = under.closest('[data-container]');
+  if (!container) return;
+  // Nothing is dropped into a cluster: a colour inside a block counts as
+  // the block, and the slot goes beside it.
+  const inBlock = container.closest('.clu');
+  if (inBlock) container = inBlock.parentElement.closest('[data-container]');
   if (!container) return;
 
   // Never drop a group inside itself, and never leave the sentence you
   // started in - a word only ever gets construed within its own sentence.
   const cid = container.dataset.container;
-  if (isGroup(drag.id) && containsNode(drag.id, cid)) return;
+  if (drag.ids.some(d => isGroup(d) && containsNode(d, cid))) return;
   if (trayOfContainer(cid) !== drag.tray) return;
 
   const kids = Array.from(container.children).filter(
@@ -2663,10 +2801,13 @@ function onPointerUp() {
     let index = 0;
     let n = slot.previousElementSibling;
     while (n) {
-      if (n.dataset && n.dataset.id && n !== drag.nodeEl) index++;
+      if (n !== drag.nodeEl) {
+        if (n.classList.contains('clu')) index += parseInt(n.dataset.count, 10);
+        else if (n.dataset && n.dataset.id) index++;
+      }
       n = n.previousElementSibling;
     }
-    moveNode(drag.id, targetId, index);
+    moveNodes(drag.ids, targetId, index);
   }
   slot.remove();
   drag = null;
@@ -2676,18 +2817,22 @@ function onPointerUp() {
 }
 
 function moveNode(id, targetContainer, index) {
-  const from = parentOf(id);
+  moveNodes([id], targetContainer, index);
+}
+// `ids` are neighbours in one container, in order: one node, or a cluster.
+function moveNodes(ids, targetContainer, index) {
+  const from = parentOf(ids[0]);
   if (!from) return;
   const fromKids = childrenOf(from);
-  const at = fromKids.indexOf(id);
+  const at = fromKids.indexOf(ids[0]);
   const toKids = childrenOf(targetContainer);
   // `index` was counted while skipping the dragged node itself, so it is
   // already expressed in post-removal coordinates - no off-by-one
   // correction here, and index === at means "put it back where it was".
   if (from === targetContainer && index === at) return;
   snapshot();
-  fromKids.splice(at, 1);
-  toKids.splice(Math.max(0, Math.min(index, toKids.length)), 0, id);
+  fromKids.splice(at, ids.length);
+  toKids.splice(Math.max(0, Math.min(index, toKids.length)), 0, ...ids);
 
   // An emptied group is meaningless; so is an empty clause line, unless
   // it is the only line the sentence has left. A relation reduced to one
